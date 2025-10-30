@@ -1,0 +1,363 @@
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import sys
+
+import mne
+from mne_bids import read_raw_bids, BIDSPath
+from autoreject import Ransac, AutoReject
+
+
+BIDS_ROOT = Path(
+    "/Users/phtn595/Library/CloudStorage/OneDrive-UniversityofLeeds/EEGManyLabs Datasets/EEGManyLabs - BIDS/resting/Eimer1996/BIDS-data-brainvision"
+)
+RESULT_FOLDER = Path(
+    "/Users/phtn595/Library/CloudStorage/OneDrive-UniversityofLeeds/Work/02_projects/EEGmanylabs_tasks/2025-10_EEGNet pipeline/eegml_resting_alpha-cbrain/results"
+)
+if not RESULT_FOLDER.exists():
+    RESULT_FOLDER.mkdir(parents=True)
+
+
+def _initial_checks(bids_root, results_dir):
+    try:
+        bids_root = Path(bids_root)
+        results_dir = Path(results_dir)
+        assert bids_root.exists()
+        assert results_dir.exists()
+    except Exception as e:
+        raise ValueError("No valid paths provided for BIDS_root and result folder.")
+
+    return bids_root, results_dir
+
+
+def _load_raw_bids(bids_root, sub_id):
+    bids_path = BIDSPath(
+        subject=sub_id.strip("sub-"), task="resting", root=bids_root, suffix="eeg"
+    )
+    raw = read_raw_bids(bids_path=bids_path)
+    fname_base = Path(bids_path).with_suffix("").name.strip("eeg")
+    return raw, fname_base
+
+
+def _preprocess_eeg(raw, detrend_mode="highpass", clean_mode="autoreject"):
+    if detrend_mode not in [None, "highpass", "DC", "linear"]:
+        raise ValueError(
+            f'mode must be one of [None, "highpass", "DC", "linear"]. got {detrend_mode} instead.'
+        )
+    if clean_mode not in [None, "autoreject", "ransac"]:
+        raise ValueError(
+            f'mode must be one of [None, "autoreject", "ransac"]. got {clean_mode} instead.'
+        )
+
+    random_state = 0
+
+    # keep only eeg
+    raw.load_data()
+    raw.pick("eeg")
+
+    # deal with case of sensor names
+    montage = mne.channels.make_standard_montage("standard_1020")
+    for ch_raw in raw.ch_names:
+        for ch_mont in montage.ch_names:
+            if ch_raw.lower() == ch_mont.lower():
+                mne.rename_channels(raw.info, {ch_raw: ch_mont})
+    raw.set_montage(montage)
+
+    # resample to 200 hz
+    raw_preprocessed = raw.resample(200)
+
+    # filter / detrend
+    if detrend_mode == "highpass":
+        raw_preprocessed.filter(l_freq=0.1, h_freq=None)
+    if detrend_mode == "DC":
+        detrend = 0
+    elif detrend_mode == "linear":
+        detrend = 1
+    else:
+        detrend = None
+
+    # epoch
+    ep = mne.Epochs(
+        raw_preprocessed,
+        tmin=0,
+        tmax=60.0,
+        preload=True,
+        reject=None,  # no rejection (done later)
+        baseline=None,  # no baseline correction
+        detrend=detrend,
+    )
+
+    # cleaning step
+    if clean_mode and clean_mode.lower() == "autoreject":
+        # autoreject
+        ar = AutoReject(random_state=random_state, cv=6)  # cv must be <= 8 (n epochs)
+        ep_preprocessed, reject_log = ar.fit_transform(ep, return_log=True)
+        # reject_log.plot('horizontal')
+    elif clean_mode and clean_mode.lower() == "ransac":
+        # ransac only
+        rsc = Ransac(random_state=random_state)
+        ep_preprocessed = rsc.fit_transform(ep)
+    else:
+        # no cleaning
+        ep_preprocessed = ep
+
+    # apply average reference
+    ep_preprocessed.set_eeg_reference("average")
+
+    return ep_preprocessed
+
+
+def _analyse(ep_preprocessed):
+    # prepare results
+    results_short = pd.DataFrame()
+    results_full_roi = pd.DataFrame()
+    results_full_all = pd.DataFrame()
+    trial_numbers = [
+        i + 1
+        for i in range(len(ep_preprocessed.annotations))
+        if not ep_preprocessed.drop_log[i]
+    ]
+    trial_types = [
+        ep["description"]
+        for i, ep in enumerate(ep_preprocessed.annotations)
+        if not ep_preprocessed.drop_log[i]
+    ]
+    for df in [results_short, results_full_roi, results_full_all]:
+        df["trial_number"] = trial_numbers
+        df["trial_type"] = trial_types
+
+    # subset channels
+    roi_occ = [
+        "POz",
+        "Oz",
+        "O1",
+        "O2",
+        "O3",
+        "O4",
+        "O5",
+        "O6",
+        "O7",
+        "O8",
+        "O9",
+        "O10",
+        "PO1",
+        "PO2",
+        "PO3",
+        "PO4",
+        "PO5",
+        "PO6",
+        "PO7",
+        "PO8",
+        "PO9",
+        "PO10",
+    ]  # occipital roi
+
+    # Find corresponding indices using mne.pick_types()
+    picks_roi = mne.pick_types(
+        ep_preprocessed.info, eeg=True, exclude="bads", selection=roi_occ
+    )
+
+    # compute PSD
+    tmin = ep_preprocessed.times[0]
+    tmax = ep_preprocessed.times[-1]
+    fmin = 1.0
+    fmax = 90.0
+    sfreq = ep_preprocessed.info["sfreq"]
+
+    spectrum = ep_preprocessed.compute_psd(
+        "welch",
+        n_fft=int(sfreq * (tmax - tmin)),
+        n_overlap=0,
+        n_per_seg=None,
+        tmin=tmin,
+        tmax=tmax,
+        fmin=fmin,
+        fmax=fmax,
+        window="boxcar",
+        verbose=False,
+    )
+    psds, freqs = spectrum.get_data(return_freqs=True)
+
+    # transform to db
+    psds = 10 * np.log10(psds)
+
+    # average alpha
+    alpha_range = np.logical_and(freqs < 12, freqs > 8)
+    mean_alpha_roi = psds[:, :, alpha_range].mean(axis=-1)[:, picks_roi]
+    mean_alpha_all = psds[:, :, alpha_range].mean(axis=-1)
+
+    # smoothen psd before peak extraction?
+    def smooth(y):
+        box_pts = 100  # eyeballed! 50, 100
+        box = np.ones(box_pts) / box_pts
+        y_smooth = np.convolve(y, box, mode="same")
+        return y_smooth
+
+    psds_smooth = np.apply_along_axis(smooth, axis=2, arr=psds)
+
+    # peak alpha
+    peak_alpha_idx_avgall = psds_smooth.mean(axis=-2)[:, alpha_range].argmax(axis=-1)
+    peak_alpha_idx_avgroi = (
+        psds_smooth[:, picks_roi, :].mean(axis=-2)[:, alpha_range].argmax(axis=-1)
+    )
+    peak_alpha_avgall = [
+        freqs[alpha_range][peak_idx] for peak_idx in peak_alpha_idx_avgall
+    ]
+    peak_alpha_avgroi = [
+        freqs[alpha_range][peak_idx] for peak_idx in peak_alpha_idx_avgroi
+    ]
+
+    peak_alpha_idx_all = psds_smooth[:, :, alpha_range].argmax(axis=-1)
+    peak_alpha_idx_roi = psds_smooth[:, picks_roi, :][:, :, alpha_range].argmax(axis=-1)
+    peak_alpha_roi = np.array(
+        [
+            [freqs[alpha_range][peak_idx] for peak_idx in peak_alpha_index]
+            for peak_alpha_index in peak_alpha_idx_roi
+        ]
+    )
+    peak_alpha_all = np.array(
+        [
+            [freqs[alpha_range][peak_idx] for peak_idx in peak_alpha_index]
+            for peak_alpha_index in peak_alpha_idx_all
+        ]
+    )
+
+    # store data
+    results_short["mean_alpha_roi (db)"] = mean_alpha_roi.mean(axis=-1)
+    results_short["peak_alpha_roi (hz)"] = peak_alpha_avgroi
+    results_short["mean_alpha_all (db)"] = mean_alpha_all.mean(axis=-1)
+    results_short["peak_alpha_all (hz)"] = peak_alpha_avgall
+
+    results_full_roi["mean_alpha (db) - avg"] = mean_alpha_roi.mean(axis=-1)
+    results_full_roi["peak_alpha (hz) - avg"] = peak_alpha_avgroi
+    for i_ch, ii in enumerate(picks_roi):
+        ch = ep_preprocessed.ch_names[ii]
+        results_full_roi[f"mean_alpha (db) - {ch}"] = mean_alpha_roi[:, i_ch]
+        results_full_roi[f"peak_alpha (hz) - {ch}"] = peak_alpha_roi[:, i_ch]
+
+    results_full_all["mean_alpha (db) - avg"] = mean_alpha_all.mean(axis=-1)
+    results_full_all["peak_alpha (hz) - avg"] = peak_alpha_avgall
+    for i_ch, ch in enumerate(ep_preprocessed.ch_names):
+        results_full_all[f"mean_alpha (db) - {ch}"] = mean_alpha_all[:, i_ch]
+        results_full_all[f"peak_alpha (hz) - {ch}"] = peak_alpha_all[:, i_ch]
+
+    # psd plot
+    fig_psd_all = _plot_psd(
+        psds=psds,
+        freqs=freqs,
+        trial_type_pdseries=results_short.trial_type,
+        title_suffix=f"full scalp ({psds.shape[1]} channels)",
+    )
+    fig_psd_roi = _plot_psd(
+        psds=psds[:, picks_roi, :],
+        freqs=freqs,
+        trial_type_pdseries=results_short.trial_type,
+        title_suffix=f"occipital ROI ({len(picks_roi)} channels)",
+    )
+    return results_short, results_full_roi, results_full_all, fig_psd_all, fig_psd_roi
+
+
+def _plot_psd(freqs, psds, trial_type_pdseries, title_suffix=None):
+    if title_suffix:
+        assert isinstance(title_suffix, str)
+    fig_psd, axes = plt.subplots(2, 1, sharex="all", sharey="none", figsize=(8, 5))
+    # psds_mean = psds.mean(axis=(0, 1))  # [freq_range]
+    # psds_std = psds.std(axis=(0, 1))  # [freq_range]
+    # psds_smooth_mean = psds_smooth.mean(axis=(0, 1))  # [freq_range]
+    # psds_smooth_std = psds_smooth.std(axis=(0, 1))  # [freq_range]
+    i_open = trial_type_pdseries.str.contains("open")
+    psds_open_mean = psds[i_open, :, :].mean(axis=(0, 1))
+    psds_open_std = psds[i_open, :, :].std(axis=(0, 1))
+
+    i_close = trial_type_pdseries.str.contains("close")
+    psds_close_mean = psds[i_close, :, :].mean(axis=(0, 1))
+    psds_close_std = psds[i_close, :, :].std(axis=(0, 1))
+
+    plot_max = max(
+        (psds_open_mean + psds_open_std).max(), (psds_close_mean + psds_close_std).max()
+    )
+    plot_min = min(
+        (psds_open_mean - psds_open_std).min(), (psds_close_mean - psds_close_std).min()
+    )
+    plot_max += abs(plot_max - plot_min) * 0.05
+    plot_min -= abs(plot_min - plot_min) * 0.05
+
+    axes[0].plot(freqs, psds_open_mean, color="b")
+    axes[0].fill_between(
+        freqs,
+        psds_open_mean - psds_open_std,
+        psds_open_mean + psds_open_std,
+        color="b",
+        alpha=0.2,
+    )
+    axes[0].set(
+        title=f"eyes open ({sum(i_open)} trials)",
+        ylabel="PSD [dB]",
+        xlim=[0, 30],
+        ylim=[plot_min, plot_max],
+    )
+
+    axes[1].plot(freqs, psds_close_mean, color="g")
+    axes[1].fill_between(
+        freqs,
+        psds_close_mean - psds_close_std,
+        psds_close_mean + psds_close_std,
+        color="g",
+        alpha=0.2,
+    )
+    axes[1].set(
+        title=f"eyes close ({sum(i_close)} trials)",
+        ylabel="PSD [dB]",
+        xlim=[0, 30],
+        ylim=[plot_min, plot_max],
+    )
+    title_suffix = f" - {title_suffix}" if title_suffix else ""
+    fig_psd.suptitle(f"Power Spectral Density (PSD){title_suffix}")
+    return fig_psd
+
+
+def main(bids_root, results_dir):
+    bids_root, results_dir = _initial_checks(bids_root, results_dir)
+    # loop over all subjects
+    for sub_dir in sorted(bids_root.glob("sub-*")):
+        sub_id = sub_dir.name
+        # sub_id = 'sub-EimB0547'
+
+        if (results_dir / f"{sub_id}_results_short.tsv").exists():
+            continue
+
+        # process data
+        raw, fname_base = _load_raw_bids(bids_root, sub_id)
+        ep_preprocessed = _preprocess_eeg(raw, detrend_mode="highpass")
+        results_short, results_full_roi, results_full_all, fig_psd_all, fig_psd_roi = (
+            _analyse(ep_preprocessed)
+        )
+
+        # store results
+        results_short.to_csv(
+            results_dir / (fname_base + "results-short.tsv"),
+            index=False,
+            sep="\t",
+            float_format="%.3f",
+        )
+        results_full_roi.to_csv(
+            results_dir / (fname_base + "results-fullroi.tsv"),
+            index=False,
+            sep="\t",
+            float_format="%.3f",
+        )
+        results_full_all.to_csv(
+            results_dir / (fname_base + "results-fullall.tsv"),
+            index=False,
+            sep="\t",
+            float_format="%.3f",
+        )
+        fig_psd_all.savefig(results_dir / (fname_base + "plot-psdall.png"))
+        fig_psd_roi.savefig(results_dir / (fname_base + "plot-psdroi.png"))
+
+
+if __name__ == "__main__":
+    bids_root, results_dir = BIDS_ROOT, RESULT_FOLDER
+    #bids_root, results_dir = sys.argv[-2:]
+    main(bids_root=bids_root, results_dir=results_dir)
