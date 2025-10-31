@@ -6,13 +6,13 @@
     "schema-version": "0.5",
     "command-line": "eegml_resting_alpha [BIDS_ROOT] [OUTPUT_PATH]",
     "container-image": {
-        "image": "dominikwelke/eegml_resting_alpha-cbrain:0.1",
+        "image": "dominikwelke/eegml_resting_alpha:0.1",
         "index": "docker://",
         "type": "singularity"
     },
     "inputs": [
         {
-            "id": "bids_input",
+            "id": "bids_root",
             "name": "BIDS root folder",
             "optional": false,
             "type": "String",
@@ -34,7 +34,7 @@
             "name": "Output Directory",
             "optional": true,
             "description": "Output directory",
-            "path-template": "[OUTPUT_PATH]/derivatives/pylossless"
+            "path-template": "[OUTPUT_PATH]"
         }
     ],
     "suggested-resources": {
@@ -55,6 +55,11 @@
             "neuroinformatics",
             "eeg",
             "eegnet"
+        ],
+        "toolbox": [
+            "mne",
+            "mne_bids",
+            "autoreject"
         ]
     }
 }
