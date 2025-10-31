@@ -1,3 +1,5 @@
+#!/usr/local/bin/python
+
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -7,16 +9,6 @@ import sys
 import mne
 from mne_bids import read_raw_bids, BIDSPath
 from autoreject import Ransac, AutoReject
-
-
-BIDS_ROOT = Path(
-    "/Users/phtn595/Library/CloudStorage/OneDrive-UniversityofLeeds/EEGManyLabs Datasets/EEGManyLabs - BIDS/resting/Eimer1996/BIDS-data-brainvision"
-)
-RESULT_FOLDER = Path(
-    "/Users/phtn595/Library/CloudStorage/OneDrive-UniversityofLeeds/Work/02_projects/EEGmanylabs_tasks/2025-10_EEGNet pipeline/eegml_resting_alpha-cbrain/results"
-)
-if not RESULT_FOLDER.exists():
-    RESULT_FOLDER.mkdir(parents=True)
 
 
 def _initial_checks(bids_root, results_dir):
@@ -358,6 +350,5 @@ def main(bids_root, results_dir):
 
 
 if __name__ == "__main__":
-    bids_root, results_dir = BIDS_ROOT, RESULT_FOLDER
-    #bids_root, results_dir = sys.argv[-2:]
+    bids_root, results_dir = sys.argv[-2:]
     main(bids_root=bids_root, results_dir=results_dir)
