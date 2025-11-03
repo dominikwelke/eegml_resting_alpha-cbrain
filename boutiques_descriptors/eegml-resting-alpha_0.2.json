@@ -1,0 +1,65 @@
+{
+    "name": "eegml-resting-alpha",
+    "author": "Dominik Welke <https://github.com/dominikwelke>",
+    "description": "Run a simple pipeline to extract alpha features on a BIDS dataset from the EEGML resting spinnoff.",
+    "tool-version": "0.2",
+    "schema-version": "0.5",
+    "command-line": "/eegml_resting_alpha/.local/bin/eegml_resting_alpha [BIDS_ROOT] [OUTPUT_PATH]",
+    "container-image": {
+        "image": "dominikwelke/eegml_resting_alpha:0.2",
+        "index": "docker://",
+        "type": "singularity"
+    },
+    "inputs": [
+        {
+            "id": "bids_root",
+            "name": "BIDS root folder",
+            "optional": false,
+            "type": "String",
+            "description": "Input BIDS folder to the pipeline.",
+            "value-key": "[BIDS_ROOT]"
+        },
+        {
+            "id": "output_path",
+            "name": "Output Path",
+            "optional": false,
+            "type": "String",
+            "description": "Output path to begin writing tool results.",
+            "value-key": "[OUTPUT_PATH]"
+        }
+    ],
+    "output-files": [
+        {
+            "id": "output_directory",
+            "name": "Output Directory",
+            "optional": true,
+            "description": "Output directory",
+            "path-template": "[OUTPUT_PATH]"
+        }
+    ],
+    "suggested-resources": {
+        "walltime-estimate": 7200,
+        "ram": 16
+    },
+    "custom": {
+        "cbrain:author": "Dominik Welke <d.welke@leeds.ac.uk>",
+        "cbrain:readonly-input-files": true,
+        "cbrain:integrator_modules": {
+            "BoutiquesInputValueFixer": {
+                "output_path": "cbrain_py_out"
+            }
+        }
+    },
+    "tags": {
+        "domain": [
+            "neuroinformatics",
+            "eeg",
+            "eegnet"
+        ],
+        "toolbox": [
+            "mne",
+            "mne_bids",
+            "autoreject"
+        ]
+    }
+}
