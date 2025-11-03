@@ -17,7 +17,7 @@ def _initial_checks(bids_root, results_dir):
         results_dir = Path(results_dir)
         assert bids_root.exists()
         assert results_dir.exists()
-    except Exception as e:
+    except Exception:
         raise ValueError("No valid paths provided for BIDS_root and result folder.")
 
     return bids_root, results_dir
@@ -78,12 +78,12 @@ def _preprocess_eeg(raw, detrend_mode="highpass", clean_mode="autoreject"):
         reject=None,  # no rejection (done later)
         baseline=None,  # no baseline correction
         detrend=detrend,
-    )
+    )[["eyes open", "eyes close"]]
 
     # cleaning step
     if clean_mode and clean_mode.lower() == "autoreject":
         # autoreject
-        ar = AutoReject(random_state=random_state, cv=6)  # cv must be <= 8 (n epochs)
+        ar = AutoReject(random_state=random_state, cv=len(ep))  # cv must be <= 8 (n epochs)
         ep_preprocessed, reject_log = ar.fit_transform(ep, return_log=True)
         # reject_log.plot('horizontal')
     elif clean_mode and clean_mode.lower() == "ransac":
@@ -106,13 +106,12 @@ def _analyse(ep_preprocessed):
     results_full_roi = pd.DataFrame()
     results_full_all = pd.DataFrame()
     trial_numbers = [
-        i + 1
-        for i in range(len(ep_preprocessed.annotations))
-        if not ep_preprocessed.drop_log[i]
+        i + 1 for i in range(len(ep_preprocessed)) if not ep_preprocessed.drop_log[i]
     ]
+    event_ids = {v:k for k,v in ep_preprocessed.event_id.items()}
     trial_types = [
-        ep["description"]
-        for i, ep in enumerate(ep_preprocessed.annotations)
+        event_ids[ev[2]]
+        for i, ev in enumerate(ep_preprocessed.events)
         if not ep_preprocessed.drop_log[i]
     ]
     for df in [results_short, results_full_roi, results_full_all]:
@@ -316,7 +315,7 @@ def main(bids_root, results_dir):
         sub_id = sub_dir.name
         # sub_id = 'sub-EimB0547'
 
-        if (results_dir / f"{sub_id}_results_short.tsv").exists():
+        if sub_id in str(list(results_dir.glob("*"))):
             continue
 
         # process data
