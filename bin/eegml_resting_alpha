@@ -27,6 +27,15 @@ def _load_raw_bids(bids_root, sub_id):
     bids_path = BIDSPath(
         subject=sub_id.strip("sub-"), task="resting", root=bids_root, suffix="eeg"
     )
+    # find session id if present (can be introduced by eegnet)
+    # quick and dirty fix; just use the first one!
+    session = None
+    for bp in bids_path.match():
+        if "_ses-" in bp.basename and "task-resting" in bp.basename:
+            session = bp.fpath.parents[1].name.strip("ses-")
+            break  # just take the first
+    bids_path.update(session=session)
+    # load data
     raw = read_raw_bids(bids_path=bids_path)
     fname_base = Path(bids_path).with_suffix("").name.strip("eeg")
     return raw, fname_base
@@ -83,7 +92,9 @@ def _preprocess_eeg(raw, detrend_mode="highpass", clean_mode="autoreject"):
     # cleaning step
     if clean_mode and clean_mode.lower() == "autoreject":
         # autoreject
-        ar = AutoReject(random_state=random_state, cv=len(ep))  # cv must be <= 8 (n epochs)
+        ar = AutoReject(
+            random_state=random_state, cv=len(ep)
+        )  # cv must be <= 8 (n epochs)
         ep_preprocessed, reject_log = ar.fit_transform(ep, return_log=True)
         # reject_log.plot('horizontal')
     elif clean_mode and clean_mode.lower() == "ransac":
@@ -108,7 +119,7 @@ def _analyse(ep_preprocessed):
     trial_numbers = [
         i + 1 for i in range(len(ep_preprocessed)) if not ep_preprocessed.drop_log[i]
     ]
-    event_ids = {v:k for k,v in ep_preprocessed.event_id.items()}
+    event_ids = {v: k for k, v in ep_preprocessed.event_id.items()}
     trial_types = [
         event_ids[ev[2]]
         for i, ev in enumerate(ep_preprocessed.events)
